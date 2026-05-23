@@ -16,7 +16,7 @@ STATE_MAP = {
     "MASSACHUSETTS": "MA", "MICHIGAN": "MI", "MINNESOTA": "MN", "MISSISSIPPI": "MS",
     "MISSOURI": "MO", "MONTANA": "MT", "NEBRASKA": "NE", "NEVADA": "NV",
     "NEW HAMPSHIRE": "NH", "NEW JERSEY": "NJ", "NEW MEXICO": "NM", "NEW YORK": "NY",
-    "NORTH CAROLINA": "NC", "NORTH DAKOTA": "ND", "OHIO": "OH", "OKLAHOMA": "OK",
+    "NORTH CAROLINA": "NC", "NORTH DAKOTA": "ND", "OHIO": "OK", "OKLAHOMA": "OK",
     "OREGON": "OR", "PENNSYLVANIA": "PA", "RHODE ISLAND": "RI", "SOUTH CAROLINA": "SC",
     "SOUTH DAKOTA": "SD", "TENNESSEE": "TN", "TEXAS": "TX", "UTAH": "UT",
     "VERMONT": "VT", "VIRGINIA": "VA", "WASHINGTON": "WA", "WEST VIRGINIA": "WV",
@@ -77,11 +77,47 @@ def clean_state(value):
     return ""
 
 
+def mask_email(value):
+    value = clean_text(value)
+
+    if not value or "@" not in value:
+        return value
+
+    username, domain = value.split("@", 1)
+
+    if len(username) <= 2:
+        masked_username = username[0] + "***"
+    else:
+        masked_username = username[0] + "***" + username[-1]
+
+    return f"{masked_username}@{domain}"
+
+
+def mask_mobile(value):
+    value = clean_text(value)
+    digits = re.sub(r"\D", "", value)
+
+    if len(digits) != 10:
+        return value
+
+    return f"(***) ***-{digits[-4:]}"
+
+
+def mask_sensitive_fields(df):
+    masked_df = df.copy()
+
+    if "Email" in masked_df.columns:
+        masked_df["Email"] = masked_df["Email"].apply(mask_email)
+
+    if "Mobile" in masked_df.columns:
+        masked_df["Mobile"] = masked_df["Mobile"].apply(mask_mobile)
+
+    return masked_df
+
+
 def remove_duplicates(df):
     duplicate_records = []
 
-    # Remove duplicate CRM IDs.
-    # Blank CRM IDs are kept so they can be reviewed instead of being treated as duplicates.
     crm_not_blank = df["CRM Id"].astype(str).str.strip() != ""
 
     crm_duplicates = df[crm_not_blank & df.duplicated(subset=["CRM Id"], keep="first")].copy()
@@ -91,8 +127,6 @@ def remove_duplicates(df):
 
     df = df[~(crm_not_blank & df.duplicated(subset=["CRM Id"], keep="first"))].copy()
 
-    # Remove duplicate emails.
-    # Blank emails are kept so they can be reviewed instead of being treated as duplicates.
     email_not_blank = df["Email"].astype(str).str.strip() != ""
 
     email_duplicates = df[email_not_blank & df.duplicated(subset=["Email"], keep="first")].copy()
@@ -118,34 +152,28 @@ def main():
 
     rows_loaded = len(df)
 
-    # Drop unwanted column
     if "Billing State/Province" in df.columns:
         df = df.drop(columns=["Billing State/Province"])
 
-    # Drop blank unnamed columns, if any exist
     unnamed_columns = [col for col in df.columns if str(col).startswith("Unnamed")]
     if unnamed_columns:
         df = df.drop(columns=unnamed_columns)
 
-    # Rename columns
     df = df.rename(columns={
         "Contact: Mobile": "Mobile",
         "Contact: Email": "Email"
     })
 
-    # Strip whitespace from all object columns
     for col in df.columns:
         if df[col].dtype == "object":
             df[col] = df[col].apply(clean_text)
 
-    # Standardize fields
     df["Contact: First Name"] = df["Contact: First Name"].apply(title_case)
     df["Contact: Last Name"] = df["Contact: Last Name"].apply(title_case)
     df["Email"] = df["Email"].apply(clean_email)
     df["Mobile"] = df["Mobile"].apply(clean_mobile)
     df["State"] = df["State"].apply(clean_state)
 
-    # Remove duplicates and save duplicate records for audit trail
     df, duplicates_df, crm_duplicates_removed, email_duplicates_removed = remove_duplicates(df)
 
     required_fields = [
@@ -183,9 +211,15 @@ def main():
     clean_df = df[df["Review Reason"] == ""].copy()
     review_df = df[df["Review Reason"] != ""].copy()
 
-    clean_df.to_csv(OUTPUT_FILE, index=False)
-    review_df.to_csv(REVIEW_FILE, index=False)
-    duplicates_df.to_csv(DUPLICATES_FILE, index=False)
+    # Mask emails and phone numbers only after validation/deduplication is complete.
+    # This keeps the logic accurate while protecting sensitive fields in public outputs.
+    public_clean_df = mask_sensitive_fields(clean_df)
+    public_review_df = mask_sensitive_fields(review_df)
+    public_duplicates_df = mask_sensitive_fields(duplicates_df)
+
+    public_clean_df.to_csv(OUTPUT_FILE, index=False)
+    public_review_df.to_csv(REVIEW_FILE, index=False)
+    public_duplicates_df.to_csv(DUPLICATES_FILE, index=False)
 
     print(f"Rows loaded: {rows_loaded}")
     print(f"Duplicate CRM Id rows removed: {crm_duplicates_removed}")
@@ -194,6 +228,7 @@ def main():
     print(f"Clean rows exported: {len(clean_df)}")
     print(f"Review rows exported: {len(review_df)}")
     print(f"Duplicate rows exported: {len(duplicates_df)}")
+    print("Sensitive fields masked in output files: Email, Mobile")
 
 
 if __name__ == "__main__":
